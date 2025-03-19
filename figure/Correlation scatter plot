@@ -1,0 +1,72 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Mar 14 15:58:22 2025
+
+@author: liche
+"""
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+# 1. 读取数据
+df = pd.read_excel("0310训练数据集.xlsx", sheet_name="All Table")
+
+# 2. 设置排除列和绘图参数
+excluded_columns = ['编号', 'Distance_to_ridge', 'Distance_to_transform']
+heatflow_col = 'Heat Flow'
+
+# 3. 获取需要绘制的特征列
+features = [col for col in df.columns if col not in excluded_columns and col != heatflow_col]
+
+# 4. 创建画布
+plt.figure(figsize=(24, 24))
+plt.subplots_adjust(hspace=0.4, wspace=0.3)
+
+# 5. 循环绘制子图
+for i, feature in enumerate(features[:16], 1):  # 只绘制前16个特征
+    ax = plt.subplot(4, 4, i)
+    
+    # 提取有效数据（排除NaN）
+    valid_data = df[[feature, heatflow_col]].dropna()
+    x = valid_data[feature]
+    y = valid_data[heatflow_col]
+    
+    # 绘制散点图
+    ax.scatter(x, y, s=10, alpha=0.6, color='steelblue')
+    
+    # 添加线性拟合曲线
+    try:
+        # 计算回归系数
+        slope, intercept = np.polyfit(x, y, 1)
+        # 生成拟合线数据
+        x_fit = np.linspace(x.min(), x.max(), 100)
+        y_fit = slope * x_fit + intercept
+        # 绘制拟合线
+        ax.plot(x_fit, y_fit, color='crimson', linewidth=1.5, linestyle='--',
+                label=f'y = {slope:.2f}x + {intercept:.2f}')
+        # 添加图例
+        ax.legend(fontsize=12, loc='upper left')
+        
+        # 可选：计算并显示R²
+        # residuals = y - (slope * x + intercept)
+        # ss_res = np.sum(residuals**2)
+        # ss_tot = np.sum((y - np.mean(y))**2)
+        # r_squared = 1 - (ss_res / ss_tot)
+        # ax.text(0.05, 0.95, f'R² = {r_squared:.2f}', transform=ax.transAxes, fontsize=10)
+        
+    except Exception as e:
+        print(f"无法为 {feature} 生成拟合线: {str(e)}")
+    
+    # 设置图表属性
+    ax.set_title(f"{feature} vs Heat Flow", fontsize=12, pad=10)
+    ax.set_xlabel(feature, fontsize=10)
+    ax.set_ylabel("Heat Flow (mW/m$^2$)", fontsize=10)
+    ax.grid(True, alpha=0.3)
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right', rotation_mode='anchor')
+
+# 6. 保存输出
+plt.savefig("heatflow_correlations_with_fit.png", dpi=300, bbox_inches='tight')
+plt.close()
+
+print("带拟合曲线的散点图已保存为 heatflow_correlations_with_fit.png")
