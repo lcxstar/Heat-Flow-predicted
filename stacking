@@ -1,0 +1,159 @@
+# -*- coding: utf-8 -*-
+"""
+Stacking集成优化系统
+Created on Tue Mar 18 10:30:48 2025
+@author: liche
+"""
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split, KFold, cross_val_score  # 修正后的导入
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVR
+from sklearn.ensemble import GradientBoostingRegressor
+from lightgbm import LGBMRegressor
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error, r2_score
+from bayes_opt import BayesianOptimization
+import joblib
+
+# 1. 数据准备与预处理
+def load_data():
+    """加载并预处理数据"""
+    data = pd.read_excel('0317特征参数16个.xlsx', sheet_name='All Table')
+    data = data.drop('编号', axis=1, errors='ignore').select_dtypes(include=['number'])
+    data = data.dropna(subset=['Heat Flow']).query("`Heat Flow` < 60")
+    
+    X = data.drop('Heat Flow', axis=1)
+    y = data['Heat Flow']
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    return train_test_split(X_scaled, y, test_size=0.2, random_state=42), scaler
+
+(X_train, X_test, y_train, y_test), scaler = load_data()
+
+# 2. 加载优化后的基模型
+def load_base_models():
+    """载入预训练的最佳基模型"""
+    return {
+        'svr': joblib.load('optimized_svr_model0.5838.pkl'),
+        'gbrt': joblib.load('optimized_gbrt_model0.5609.pkl'),
+        'lgb': joblib.load('optimized_lgb_model0.541697.pkl'),
+        'knn': joblib.load('optimized_knn_model0.5536.pkl')
+    }
+
+base_models = load_base_models()
+
+# 3. Stacking特征生成
+class StackingFeatureGenerator:
+    """生成Stacking特征的工厂类"""
+    
+    def __init__(self, base_models, n_folds=5):
+        self.base_models = base_models
+        self.n_folds = n_folds
+        self.meta_features = None
+    
+    def generate_features(self, X, y):
+        """生成元特征矩阵"""
+        kf = KFold(n_splits=self.n_folds, shuffle=True, random_state=42)
+        S_train = np.zeros((X.shape[0], len(self.base_models)))
+        
+        for i, (name, model) in enumerate(self.base_models.items()):
+            fold_preds = np.zeros(X.shape[0])
+            for train_idx, val_idx in kf.split(X):
+                X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+                y_train_fold = y.iloc[train_idx]
+                
+                model.fit(X_train_fold, y_train_fold)
+                fold_preds[val_idx] = model.predict(X_val_fold)
+            
+            S_train[:, i] = fold_preds
+        return S_train
+
+# 生成训练集和测试集的元特征
+feature_generator = StackingFeatureGenerator(base_models)
+S_train = feature_generator.generate_features(X_train, y_train)
+S_test = np.column_stack([model.predict(X_test) for model in base_models.values()])
+
+# 4. 贝叶斯优化元模型参数
+def stacking_objective(alpha, fit_intercept):
+    """优化目标函数：Ridge回归参数优化"""
+    meta_model = Ridge(
+        alpha=alpha,
+        fit_intercept=bool(fit_intercept),
+        random_state=42
+    )
+    
+    # 3次重复交叉验证
+    cv_scores = []
+    for _ in range(3):
+        scores = cross_val_score(meta_model, S_train, y_train, 
+                               cv=KFold(5), scoring='r2', n_jobs=-1)
+        cv_scores.append(np.mean(scores))
+    
+    return np.mean(cv_scores)
+
+# 参数优化执行
+optimizer = BayesianOptimization(
+    f=stacking_objective,
+    pbounds={
+        'alpha': (0.001, 60),       # 正则化强度
+        'fit_intercept': (0, 1)    # 是否包含截距
+    },
+    random_state=42,
+    verbose=2
+)
+optimizer.maximize(init_points=15, n_iter=100)
+
+# 5. 集成模型构建与评估
+def build_stacking_model():
+    """构建最终Stacking模型"""
+    best_params = optimizer.max['params']
+    return {
+        'base_models': base_models,
+        'meta_model': Ridge(
+            alpha=best_params['alpha'],
+            fit_intercept=bool(best_params['fit_intercept']),
+            random_state=42
+        ).fit(S_train, y_train),
+        'scaler': scaler
+    }
+
+stacking_model = build_stacking_model()
+
+# 模型评估
+def evaluate_model(model):
+    """评估Stacking模型性能"""
+    S_test = np.column_stack([m.predict(X_test) for m in model['base_models'].values()])
+    y_pred = model['meta_model'].predict(S_test)
+    
+    return {
+        'MSE': mean_squared_error(y_test, y_pred),
+        'RMSE': np.sqrt(mean_squared_error(y_test, y_pred)),
+        'R2': r2_score(y_test, y_pred)
+    }
+
+metrics = evaluate_model(stacking_model)
+print(f"Stacking模型评估结果: {metrics}")
+
+# 6. 模型保存与部署
+def save_model(model, path='optimized_stacking_model.pkl'):
+    """保存完整Stacking模型"""
+    joblib.dump(model, path)
+    print(f"模型已保存至 {path}")
+
+save_model(stacking_model)
+
+# 7. 模型解释性分析
+def analyze_model_weights(model):
+    """分析基模型权重贡献"""
+    weights = pd.DataFrame({
+        'Base Model': model['base_models'].keys(),
+        'Weight': model['meta_model'].coef_
+    }).sort_values('Weight', ascending=False)
+    
+    print("\n基模型权重分析:")
+    print(weights)
+    
+analyze_model_weights(stacking_model)
